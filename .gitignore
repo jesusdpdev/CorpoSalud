@@ -5,3 +5,4 @@
 !**/.env.example
 npm-debug.log*
 yarn-debug.log*
+**/.env.example
