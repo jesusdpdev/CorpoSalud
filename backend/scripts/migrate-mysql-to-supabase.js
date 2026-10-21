@@ -90,54 +90,66 @@ async function migrate() {
     }
 
     const migrationPrefix = `migration-${randomUUID()}`;
-    await target.query('BEGIN');
+    const targetClient = await target.connect();
     const migratedCounts = [];
 
-    for (const table of TABLES) {
-      const [sourceRows] = await source.query(`SELECT * FROM \`${table}\``);
-      const targetColumns = table === 'excel_importaciones'
-        ? Object.keys(sourceRows[0] || {}).filter(column => column !== 'archivo').concat('storage_path')
-        : Object.keys(sourceRows[0] || {});
+    try {
+      await targetClient.query('BEGIN');
 
-      for (const sourceRow of sourceRows) {
-        const row = { ...sourceRow };
-        if (table === 'excel_importaciones') {
-          const filename = String(row.nombre_archivo).replace(/[\\/:*?"<>|]/g, '_');
-          const path = `${migrationPrefix}/${row.id}/${filename}`;
-          const isMacroEnabled = filename.toLowerCase().endsWith('.xlsm');
-          const { error } = await supabase.storage.from(bucketName).upload(path, row.archivo, {
-            contentType: isMacroEnabled
-              ? 'application/vnd.ms-excel.sheet.macroEnabled.12'
-              : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            upsert: false,
-          });
-          if (error) throw new Error(`No se pudo migrar un Excel a Storage: ${error.message}`);
-          uploadedPaths.push(path);
-          row.storage_path = path;
-          delete row.archivo;
+      for (const table of TABLES) {
+        const [sourceRows] = await source.query(`SELECT * FROM \`${table}\``);
+        const targetColumns = table === 'excel_importaciones'
+          ? Object.keys(sourceRows[0] || {}).filter(column => column !== 'archivo').concat('storage_path')
+          : Object.keys(sourceRows[0] || {});
+
+        for (const sourceRow of sourceRows) {
+          const row = { ...sourceRow };
+          if (table === 'excel_importaciones') {
+            const filename = String(row.nombre_archivo).replace(/[\\/:*?"<>|]/g, '_');
+            const path = `${migrationPrefix}/${row.id}/${filename}`;
+            const isMacroEnabled = filename.toLowerCase().endsWith('.xlsm');
+            const { error } = await supabase.storage.from(bucketName).upload(path, row.archivo, {
+              contentType: isMacroEnabled
+                ? 'application/vnd.ms-excel.sheet.macroEnabled.12'
+                : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+              upsert: false,
+            });
+            if (error) throw new Error(`No se pudo migrar un Excel a Storage: ${error.message}`);
+            uploadedPaths.push(path);
+            row.storage_path = path;
+            delete row.archivo;
+          }
+
+          const values = targetColumns.map(column => row[column]);
+          const placeholders = values.map((_, index) => `$${index + 1}`).join(', ');
+          const columnsSql = targetColumns.map(quoteIdentifier).join(', ');
+          await targetClient.query(
+            `INSERT INTO ${quoteIdentifier(table)} (${columnsSql}) VALUES (${placeholders})`,
+            values
+          );
         }
+        migratedCounts.push({ table, count: sourceRows.length });
+        console.log(`Migrated ${sourceRows.length} rows from ${table}.`);
+      }
 
-        const values = targetColumns.map(column => row[column]);
-        const placeholders = values.map((_, index) => `$${index + 1}`).join(', ');
-        const columnsSql = targetColumns.map(quoteIdentifier).join(', ');
-        await target.query(
-          `INSERT INTO ${quoteIdentifier(table)} (${columnsSql}) VALUES (${placeholders})`,
-          values
+      for (const table of TABLES) {
+        await targetClient.query(
+          `SELECT setval(pg_get_serial_sequence($1, 'id'), GREATEST(COALESCE(MAX(id), 1), 1), COUNT(*) > 0)
+           FROM ${quoteIdentifier(table)}`,
+          [`public.${table}`]
         );
       }
-      migratedCounts.push({ table, count: sourceRows.length });
-      console.log(`Migrated ${sourceRows.length} rows from ${table}.`);
+      await targetClient.query('COMMIT');
+    } catch (error) {
+      try {
+        await targetClient.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Could not roll back the target database transaction:', rollbackError.message);
+      }
+      throw error;
+    } finally {
+      targetClient.release();
     }
-
-    for (const table of TABLES) {
-      const { rows } = await target.query(
-        `SELECT setval(pg_get_serial_sequence($1, 'id'), GREATEST(COALESCE(MAX(id), 1), 1), COUNT(*) > 0)
-         FROM ${quoteIdentifier(table)}`,
-        [`public.${table}`]
-      );
-      if (!rows) throw new Error(`No se pudo sincronizar la secuencia de ${table}.`);
-    }
-    await target.query('COMMIT');
     console.log('Migration completed. Row counts:', JSON.stringify(migratedCounts));
     console.log(`Excel files were copied to the private "${bucketName}" bucket.`);
   } catch (error) {

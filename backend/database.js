@@ -32,6 +32,11 @@ function toPostgresPlaceholders(sql) {
   return converted;
 }
 
+function getPostgresSslConfig(value = process.env.DATABASE_SSL) {
+  if (value === 'false') return false;
+  return { rejectUnauthorized: value !== 'require' };
+}
+
 function createMysqlCompatiblePool(pool) {
   async function executeWith(client, sql, values = []) {
     const result = await client.query(toPostgresPlaceholders(sql), values);
@@ -71,7 +76,7 @@ if (process.env.DATABASE_URL) {
     max: Number(process.env.DB_POOL_SIZE) || 5,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 10000,
-    ssl: process.env.DATABASE_SSL === 'false' ? false : { rejectUnauthorized: true },
+    ssl: getPostgresSslConfig(),
   });
   module.exports = createMysqlCompatiblePool(pool);
 } else if (process.env.NODE_ENV !== 'production' && process.env.DB_HOST) {
@@ -88,3 +93,4 @@ if (process.env.DATABASE_URL) {
 }
 
 module.exports.toPostgresPlaceholders = toPostgresPlaceholders;
+module.exports.getPostgresSslConfig = getPostgresSslConfig;

@@ -16,3 +16,15 @@ test('preserves doubled apostrophes while converting query parameters', () => {
     "SELECT '?' AS mark, 'it''s ok' AS note, id FROM users WHERE id = $1"
   );
 });
+
+test('keeps certificate validation enabled by default', () => {
+  assert.deepEqual(pool.getPostgresSslConfig('true'), { rejectUnauthorized: true });
+});
+
+test('allows encrypted PostgreSQL connections without certificate validation when explicitly requested', () => {
+  assert.deepEqual(pool.getPostgresSslConfig('require'), { rejectUnauthorized: false });
+});
+
+test('disables PostgreSQL TLS only when explicitly set to false', () => {
+  assert.equal(pool.getPostgresSslConfig('false'), false);
+});
